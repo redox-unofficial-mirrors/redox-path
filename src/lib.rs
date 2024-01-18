@@ -1,3 +1,4 @@
+#![feature(str_split_remainder)]
 #![no_std]
 
 extern crate alloc;
@@ -9,10 +10,12 @@ use alloc::{
 };
 use core::fmt;
 
+/// The name of a scheme
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RedoxScheme<'a>(Cow<'a, str>);
 
 impl<'a> RedoxScheme<'a> {
+    /// Create a new [`RedoxScheme`], ensuring there are no invalid characters
     pub fn new<S: Into<Cow<'a, str>>>(scheme: S) -> Option<Self> {
         let scheme = scheme.into();
         // Scheme cannot have NUL, /, or :
@@ -29,10 +32,12 @@ impl<'a> AsRef<str> for RedoxScheme<'a> {
     }
 }
 
+/// The part of a path that is sent to each scheme
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RedoxReference<'a>(Cow<'a, str>);
 
 impl<'a> RedoxReference<'a> {
+    /// Create a new [`RedoxReference`], ensuring there are no invalid characters
     pub fn new<S: Into<Cow<'a, str>>>(reference: S) -> Option<Self> {
         let reference = reference.into();
         // Reference cannot have NUL
@@ -108,6 +113,7 @@ impl<'a> AsRef<str> for RedoxReference<'a> {
     }
 }
 
+/// A fully qualified Redox path
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum RedoxPath<'a> {
     /// Standard UNIX compatible format
@@ -163,6 +169,48 @@ impl<'a> RedoxPath<'a> {
             }
         })
     }
+
+    /// Convert into a RedoxScheme and RedoxReference.
+    /// - Standard paths will parse `/scheme/scheme_name/reference`, and anything not starting
+    ///   with `/scheme` will be parsed as being part of the `file` scheme
+    /// - Legacy paths can be instantly converted
+    pub fn as_parts(&'a self) -> (RedoxScheme<'a>, RedoxReference<'a>) {
+        match self {
+            Self::Standard(reference) => {
+                //TODO: this does not use the RedoxScheme::new and RedoxReference::new functions
+                let mut parts = reference.0.split('/');
+                loop {
+                    match parts.next() {
+                        Some("") => {
+                            // Ignore empty parts
+                        }
+                        Some("scheme") => match parts.next() {
+                            Some(scheme_name) => {
+                                // Path is in /scheme/scheme_name
+                                let remainder = parts.remainder().unwrap_or("");
+                                return (
+                                    RedoxScheme(Cow::from(scheme_name)),
+                                    RedoxReference(Cow::from(remainder)),
+                                );
+                            }
+                            None => {
+                                // Path is the root scheme
+                                return (RedoxScheme(Cow::from("")), RedoxReference(Cow::from("")));
+                            }
+                        },
+                        _ => {
+                            // If path has no special processing, it is inside the file scheme
+                            return (RedoxScheme(Cow::from("file")), reference.clone());
+                        }
+                    }
+                }
+            }
+            Self::Legacy(scheme, reference) => {
+                // Legacy paths are already split
+                (scheme.clone(), reference.clone())
+            }
+        }
+    }
 }
 
 impl<'a> fmt::Display for RedoxPath<'a> {
@@ -199,7 +247,7 @@ pub fn canonicalize_using_cwd<'a>(cwd_opt: Option<&str>, path: &'a str) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::string::ToString;
+    use alloc::{format, string::ToString};
 
     // Tests absolute paths without scheme
     #[test]
@@ -385,6 +433,26 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    // Tests path splitting to parts
+    #[test]
+    fn test_parts() {
+        for (path, scheme, reference) in &[
+            ("foo:bar/baz", "foo", "bar/baz"),
+            ("/foo/bar/baz", "file", "foo/bar/baz"),
+            ("/scheme/foo/bar/baz", "foo", "bar/baz"),
+        ] {
+            let path = RedoxPath::from_absolute(path).unwrap();
+            let parts = path.as_parts();
+            assert_eq!(
+                parts,
+                (
+                    RedoxScheme::new(*scheme).unwrap(),
+                    RedoxReference::new(*reference).unwrap()
+                )
+            );
         }
     }
 }
