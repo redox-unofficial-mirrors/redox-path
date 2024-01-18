@@ -3,8 +3,7 @@
 extern crate alloc;
 
 use alloc::{
-    borrow::{Cow, ToOwned},
-    format,
+    borrow::Cow,
     string::{String, ToString},
     vec::Vec,
 };
@@ -64,7 +63,7 @@ impl<'a> RedoxReference<'a> {
     ///
     /// Returns `Some` on success and `None` if the path is not valid
     pub fn canonical(&self) -> Option<Self> {
-        let mut canonical = {
+        let canonical = {
             let parts = self
                 .0
                 .split('/')
