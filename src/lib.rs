@@ -23,6 +23,12 @@ impl<'a> RedoxScheme<'a> {
     }
 }
 
+impl<'a> AsRef<str> for RedoxScheme<'a> {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RedoxReference<'a>(Cow<'a, str>);
 
@@ -93,6 +99,12 @@ impl<'a> RedoxReference<'a> {
             })
         };
         Self::new(canonical)
+    }
+}
+
+impl<'a> AsRef<str> for RedoxReference<'a> {
+    fn as_ref(&self) -> &str {
+        self.0.as_ref()
     }
 }
 
