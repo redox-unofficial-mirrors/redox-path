@@ -5,6 +5,7 @@ extern crate alloc;
 
 use alloc::{
     borrow::Cow,
+    format,
     string::{String, ToString},
     vec::Vec,
 };
@@ -29,6 +30,12 @@ impl<'a> RedoxScheme<'a> {
 impl<'a> AsRef<str> for RedoxScheme<'a> {
     fn as_ref(&self) -> &str {
         self.0.as_ref()
+    }
+}
+
+impl<'a> fmt::Display for RedoxScheme<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -122,6 +129,12 @@ impl<'a> AsRef<str> for RedoxReference<'a> {
     }
 }
 
+impl<'a> fmt::Display for RedoxReference<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// A fully qualified Redox path
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum RedoxPath<'a> {
@@ -148,8 +161,8 @@ impl<'a> RedoxPath<'a> {
         })
     }
 
-    /// Join a [`RedoxPath`] with a path. Relative paths will be joined, absolute paths will be
-    /// returned as-is.
+    /// Join a [`RedoxPath`] with a &str path. Relative paths will be appended to self,
+    /// absolute paths will be returned as a RedoxPath, ignoring self.
     ///
     /// Returns `Some` on success and `None` if the path is not valid
     pub fn join(&self, path: &'a str) -> Option<Self> {
@@ -183,6 +196,7 @@ impl<'a> RedoxPath<'a> {
     ///
     /// Returns false if any segment is ".", ".." or "".
     /// A path that is empty is allowed and is interpreted as "/".
+    /// Legacy paths are assumed to be canonical.
     pub fn is_canon(&self) -> bool {
         match self {
             Self::Standard(reference) => reference.is_canon(),
@@ -190,7 +204,7 @@ impl<'a> RedoxPath<'a> {
         }
     }
 
-    /// Convert into a RedoxScheme and RedoxReference.
+    /// Convert into a [`RedoxScheme`] and [`RedoxReference`].
     /// - Standard paths will parse `/scheme/scheme_name/reference`, and anything not starting
     ///   with `/scheme` will be parsed as being part of the `file` scheme
     /// - Legacy paths can be instantly converted
@@ -237,6 +251,67 @@ impl<'a> RedoxPath<'a> {
             }
         }
     }
+
+    /// Is the scheme for this path the same as the given string?
+    pub fn matches_scheme(&self, other: &str) -> bool {
+        if let Some((scheme, _)) = self.as_parts() {
+            scheme.0 == other
+        } else {
+            false
+        }
+    }
+
+    /// Does the scheme match the given category, e.g. "disk-"
+    pub fn is_scheme_category(&self, category: &str) -> bool {
+        if let Some((scheme, _)) = self.as_parts() {
+            let mut parts = scheme.0.splitn(2, '.');
+            if let Some(cat) = parts.next() {
+                cat == category && parts.next().is_some()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Is this the default scheme, "/scheme/file"?
+    pub fn is_default_scheme(&self) -> bool {
+        self.matches_scheme("file")
+    }
+
+    /// Is this a Legacy format path?
+    pub fn is_legacy(&self) -> bool {
+        match self {
+            RedoxPath::Legacy(_, _) => true,
+            _ => false,
+        }
+    }
+
+    /// Format a [`RedoxPath`] into a UNIX style path
+    pub fn to_standard(&self) -> String {
+        match self {
+            RedoxPath::Standard(reference) => {
+                format!("/{}", reference.0)
+            }
+            RedoxPath::Legacy(scheme, reference) => {
+                format!("/scheme/{}/{}", scheme.0, reference.0)
+            }
+        }
+    }
+
+    /// Format a [`RedoxPath`] into a UNIX style path,
+    /// ensuring it is canonicalized
+    pub fn to_standard_canon(&self) -> Option<String> {
+        Some(match self {
+            RedoxPath::Standard(reference) => {
+                format!("/{}", reference.canonical()?.0)
+            }
+            RedoxPath::Legacy(scheme, reference) => {
+                canonicalize_using_scheme(scheme.as_ref(), reference.as_ref().trim_start_matches('/'))?
+            }
+        })
+    }
 }
 
 impl<'a> fmt::Display for RedoxPath<'a> {
@@ -260,7 +335,7 @@ impl<'a> fmt::Display for RedoxPath<'a> {
 /// "." and empty segments "//" will be removed.
 /// ".." will be resolved by backing up one directory, except at the root,
 /// where ".." will be ignored and removed.
-/// 
+///
 /// For old format schemes,
 /// given a cwd of "scheme:/path", this function will turn "foo" into "scheme:/path/foo".
 /// "/foo" will turn into "file:/foo". "bar:/foo" will be used directly, as it is already
@@ -278,11 +353,44 @@ pub fn canonicalize_using_cwd<'a>(cwd_opt: Option<&str>, path: &'a str) -> Optio
     Some(canonical.to_string())
 }
 
+/// Canonicalize as in [`canonicalize_using_cwd`], but Legacy format paths
+/// are canonicalized into UNIX format
+pub fn canonicalize_to_standard<'a>(cwd_opt: Option<&str>, path: &'a str) -> Option<String> {
+    let absolute = match RedoxPath::from_absolute(path) {
+        Some(absolute) => absolute,
+        None => {
+            let cwd = cwd_opt?;
+            let absolute = RedoxPath::from_absolute(cwd)?;
+            absolute.join(path)?
+        }
+    };
+    absolute.to_standard_canon()
+}
+
 /// Make a path that is relative to the root of a scheme into a full path,
 /// following the rules of [`canonicalize_using_cwd`].
+///
+/// Returns the Some if a valid path can be constructed,
+/// None if the scheme name is not valid or some other error occurs
 pub fn canonicalize_using_scheme<'a>(scheme: &str, path: &'a str) -> Option<String> {
-    let scheme_path = RedoxPath::from_absolute("/scheme")?.join(scheme)?.to_string();
-    canonicalize_using_cwd(Some(&scheme_path), path)
+    canonicalize_using_cwd(Some(&scheme_path(scheme)?), path)
+}
+
+/// The path for a given scheme name
+///
+/// Returns Some if the scheme name is valid, None otherwise
+pub fn scheme_path(name: &str) -> Option<String> {
+    let _ = RedoxScheme::new(name)?;
+    canonicalize_using_cwd(Some("/scheme"), name)
+}
+
+/// Make a scheme name (not a full path) for a device of a given category
+///
+/// Returns Some if the resulting scheme name is valid, None otherwise
+pub fn make_scheme_name(category: &str, detail: &str) -> Option<String> {
+    let name = format!("{}.{}", category, detail);
+    let _ = RedoxScheme::new(&name)?;
+    Some(name)
 }
 
 #[cfg(test)]
@@ -563,5 +671,168 @@ mod tests {
 
         // slash is not allowed in scheme names
         assert_eq!(RedoxPath::from_absolute("scheme/withslash:path"), None);
+        // empty path is not allowed for from_absolute
+        assert_eq!(RedoxPath::from_absolute(""), None)
+    }
+
+    #[test]
+    fn test_matches() {
+        assert!(RedoxPath::from_absolute("/scheme/foo")
+            .unwrap()
+            .matches_scheme("foo"));
+        assert!(RedoxPath::from_absolute("/scheme/foo/bar")
+            .unwrap()
+            .matches_scheme("foo"));
+        assert!(!RedoxPath::from_absolute("/scheme/foo")
+            .unwrap()
+            .matches_scheme("bar"));
+        assert!(RedoxPath::from_absolute("foo:")
+            .unwrap()
+            .matches_scheme("foo"));
+        assert!(RedoxPath::from_absolute(
+            &canonicalize_using_cwd(Some("/scheme/foo"), "bar").unwrap()
+        )
+        .unwrap()
+        .matches_scheme("foo"));
+        assert!(
+            RedoxPath::from_absolute(&canonicalize_using_cwd(Some("/foo"), "bar").unwrap())
+                .unwrap()
+                .matches_scheme("file")
+        );
+        assert!(RedoxPath::from_absolute(
+            &canonicalize_using_cwd(Some("/scheme"), "foo/bar").unwrap()
+        )
+        .unwrap()
+        .matches_scheme("foo"));
+        assert!(RedoxPath::from_absolute("foo:/bar")
+            .unwrap()
+            .matches_scheme("foo"));
+        assert!(!RedoxPath::from_absolute("foo:/bar")
+            .unwrap()
+            .matches_scheme("bar"));
+        assert!(RedoxPath::from_absolute("/scheme/file")
+            .unwrap()
+            .is_default_scheme());
+        assert!(!RedoxPath::from_absolute("/scheme/foo")
+            .unwrap()
+            .is_default_scheme());
+        assert!(RedoxPath::from_absolute("file:bar")
+            .unwrap()
+            .is_default_scheme());
+        assert!(RedoxPath::from_absolute("file:")
+            .unwrap()
+            .is_default_scheme());
+        assert!(!RedoxPath::from_absolute("foo:bar")
+            .unwrap()
+            .is_default_scheme());
+        assert!(RedoxPath::from_absolute("foo:bar").unwrap().is_legacy());
+        assert!(!RedoxPath::from_absolute("/foo/bar").unwrap().is_legacy());
+    }
+
+    #[test]
+    fn test_to_standard() {
+        assert_eq!(
+            &RedoxPath::from_absolute("foo:bar").unwrap().to_standard(),
+            "/scheme/foo/bar"
+        );
+        assert_eq!(
+            &RedoxPath::from_absolute("file:bar").unwrap().to_standard(),
+            "/scheme/file/bar"
+        );
+        assert_eq!(
+            &RedoxPath::from_absolute("/scheme/foo/bar")
+                .unwrap()
+                .to_standard(),
+            "/scheme/foo/bar"
+        );
+        assert_eq!(
+            &RedoxPath::from_absolute("/foo/bar").unwrap().to_standard(),
+            "/foo/bar"
+        );
+        assert_eq!(
+            &RedoxPath::from_absolute("foo:bar/../bar2")
+                .unwrap()
+                .to_standard_canon()
+                .unwrap(),
+            "/scheme/foo/bar2"
+        );
+        assert_eq!(
+            &RedoxPath::from_absolute("file:bar/./../bar2")
+                .unwrap()
+                .to_standard_canon()
+                .unwrap(),
+            "/scheme/file/bar2"
+        );
+        assert_eq!(
+            &RedoxPath::from_absolute("/scheme/file/bar/./../../foo/bar")
+                .unwrap()
+                .to_standard_canon()
+                .unwrap(),
+            "/scheme/foo/bar"
+        );
+        assert_eq!(
+            &RedoxPath::from_absolute("/foo/bar")
+                .unwrap()
+                .to_standard_canon()
+                .unwrap(),
+            "/foo/bar"
+        );
+        assert_eq!(
+            &canonicalize_to_standard(None, "/scheme/foo/bar").unwrap(),
+            "/scheme/foo/bar"
+        );
+        assert_eq!(
+            &canonicalize_to_standard(None, "foo:bar").unwrap(),
+            "/scheme/foo/bar"
+        );
+        assert_eq!(
+            &canonicalize_to_standard(None, "foo:bar/../..").unwrap(),
+            "/scheme"
+        );
+        assert_eq!(
+            &canonicalize_to_standard(None, "/scheme/foo/bar/..").unwrap(),
+            "/scheme/foo"
+        );
+        assert_eq!(
+            &canonicalize_to_standard(None, "foo:bar/bar2/..").unwrap(),
+            "/scheme/foo/bar"
+        );
+    }
+
+    #[test]
+    fn test_scheme_path() {
+        assert_eq!(scheme_path("foo"), Some("/scheme/foo".to_string()));
+        assert_eq!(scheme_path(""), Some("/scheme".to_string()));
+        assert_eq!(scheme_path("/foo"), None);
+        assert_eq!(scheme_path("foo/bar"), None);
+        assert_eq!(scheme_path("foo:"), None);
+    }
+
+    #[test]
+    fn test_category() {
+        assert_eq!(make_scheme_name("foo", "bar"), Some("foo.bar".to_string()));
+        assert_eq!(
+            RedoxPath::from_absolute(
+                &scheme_path(&make_scheme_name("foo", "bar").unwrap()).unwrap()
+            )
+            .unwrap(),
+            RedoxPath::Standard(RedoxReference::new("scheme/foo.bar").unwrap())
+        );
+        assert_eq!(make_scheme_name("foo", "/bar"), None);
+        assert_eq!(make_scheme_name("foo", ":bar"), None);
+        assert!(RedoxPath::from_absolute(
+            &scheme_path(&make_scheme_name("foo", "bar").unwrap()).unwrap()
+        )
+        .unwrap()
+        .is_scheme_category("foo"));
+        assert!(RedoxPath::from_absolute("/scheme/foo.bar/bar2")
+            .unwrap()
+            .is_scheme_category("foo"));
+        assert!(!RedoxPath::from_absolute("/scheme/foo/bar")
+            .unwrap()
+            .is_scheme_category("foo"));
+        assert!(!RedoxPath::from_absolute("/foo.bar/bar2")
+            .unwrap()
+            .is_scheme_category("foo"));
     }
 }
