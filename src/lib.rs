@@ -1,4 +1,3 @@
-#![feature(str_split_remainder)]
 #![no_std]
 
 extern crate alloc;
@@ -209,6 +208,8 @@ impl<'a> RedoxPath<'a> {
     ///   with `/scheme` will be parsed as being part of the `file` scheme
     /// - Legacy paths can be instantly converted
     pub fn as_parts(&'a self) -> Option<(RedoxScheme<'a>, RedoxReference<'a>)> {
+        const SCHEME_PREFIX_LENGTH: usize = "scheme/".len();
+
         if !self.is_canon() {
             return None;
         }
@@ -224,7 +225,9 @@ impl<'a> RedoxPath<'a> {
                         Some("scheme") => match parts.next() {
                             Some(scheme_name) => {
                                 // Path is in /scheme/scheme_name
-                                let remainder = parts.remainder().unwrap_or("");
+                                let scheme_length = SCHEME_PREFIX_LENGTH + scheme_name.len() + 1;
+                                let remainder = reference.0.get(scheme_length..).unwrap_or("");
+
                                 return Some((
                                     RedoxScheme(Cow::from(scheme_name)),
                                     RedoxReference(Cow::from(remainder)),
@@ -307,9 +310,10 @@ impl<'a> RedoxPath<'a> {
             RedoxPath::Standard(reference) => {
                 format!("/{}", reference.canonical()?.0)
             }
-            RedoxPath::Legacy(scheme, reference) => {
-                canonicalize_using_scheme(scheme.as_ref(), reference.as_ref().trim_start_matches('/'))?
-            }
+            RedoxPath::Legacy(scheme, reference) => canonicalize_using_scheme(
+                scheme.as_ref(),
+                reference.as_ref().trim_start_matches('/'),
+            )?,
         })
     }
 }
