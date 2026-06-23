@@ -2,7 +2,7 @@
 
 extern crate alloc;
 
-use alloc::{borrow::Cow, format, string::ToString, vec::Vec};
+use alloc::{borrow::Cow, format, string::ToString};
 use core::{ffi::CStr, fmt};
 
 /// The name of a scheme
@@ -81,11 +81,12 @@ impl<'a> RedoxReference<'a> {
 
     /// Canonicalize [`RedoxReference`], removing . and ...
     /// For compability with legacy scheme, a relative path will be remain relative.
-    pub fn canonical(&self) -> Self {
+    pub fn canonical(self) -> Self {
         let canonical = {
             let mut canonalized = true;
             let mut is_absolute = false;
-            let mut parts = Vec::new();
+            let mut parts = [""; 4096]; // PATH_MAX
+            let mut parts_len = 0;
             for (i, part) in self.0.split('/').enumerate() {
                 if part.is_empty() {
                     if i == 0 {
@@ -96,18 +97,24 @@ impl<'a> RedoxReference<'a> {
                 } else if part == "." {
                     canonalized = false;
                 } else if part == ".." {
-                    parts.pop();
+                    if parts_len > 0 {
+                        parts_len -= 1;
+                    }
                     canonalized = false;
                 } else {
-                    parts.push(part);
+                    if parts_len >= 4096 {
+                        break;
+                    }
+                    parts[parts_len] = part;
+                    parts_len += 1;
                 }
             }
 
             if canonalized {
-                return self.clone();
+                return self;
             }
             let mut string = if is_absolute { "/" } else { "" }.to_string();
-            for (i, part) in parts.iter().enumerate() {
+            for (i, part) in parts[..parts_len].iter().enumerate() {
                 if i > 0 {
                     string.push('/');
                 }
