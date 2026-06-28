@@ -24,7 +24,7 @@ impl<'a> RedoxScheme<'a> {
     }
 
     /// Similar to [`canonicalize_using_scheme`]
-    pub fn canonicalize_as_scheme<'b>(&self, path: RedoxReference<'b>) -> Cow<'b, str> {
+    pub fn canonicalize_as_scheme<'b>(&self, path: RedoxReference<'b>) -> RedoxPath<'b> {
         canonicalize_using_scheme_checked(self, Err(path))
     }
 }
@@ -366,10 +366,7 @@ impl<'a> RedoxPath<'a> {
 
     /// Is this a Legacy format path?
     pub fn is_legacy(&self) -> bool {
-        match self {
-            RedoxPath::Legacy(_, _) => true,
-            _ => false,
-        }
+        matches!(self, RedoxPath::Legacy(_, _))
     }
 
     /// Format a [`RedoxPath`] into a UNIX style path
@@ -393,6 +390,7 @@ impl<'a> RedoxPath<'a> {
             RedoxPath::Standard(reference) => reference.canonical().0,
             RedoxPath::Legacy(scheme, reference) => {
                 canonicalize_using_scheme_checked(&scheme, Ok(RedoxPath::Standard(reference)))
+                    .into()
             }
         }
     }
@@ -408,13 +406,13 @@ impl<'a> RedoxPath<'a> {
     }
 
     /// Similar to [`canonicalize_using_cwd`]
-    pub fn canonicalize_as_cwd<'b>(&self, path: RedoxReference<'b>) -> Cow<'b, str> {
+    pub fn canonicalize_as_cwd<'b>(&self, path: RedoxReference<'b>) -> RedoxPath<'b> {
         // SAFETY: canonicalize_using_cwd_checked will None only if cwd_opt is None
         canonicalize_using_cwd_checked(Some(self), Err(path), false).unwrap()
     }
 
     /// Similar to [`canonicalize_to_standard`]
-    pub fn canonicalize_as_cwd_standard<'b>(&self, path: RedoxReference<'b>) -> Cow<'b, str> {
+    pub fn canonicalize_as_cwd_standard<'b>(&self, path: RedoxReference<'b>) -> RedoxReference<'b> {
         // SAFETY: canonicalize_to_standard_checked will None only if cwd_opt is None
         canonicalize_to_standard_checked(Some(self), Err(path)).unwrap()
     }
@@ -460,11 +458,12 @@ type RedoxPathStr<'a> = Result<RedoxPath<'a>, RedoxReference<'a>>;
 /// absolute.
 pub fn canonicalize_using_cwd<'a>(cwd_opt: Option<&'a str>, path: &'a str) -> Option<Cow<'a, str>> {
     let cwd_opt = cwd_opt.and_then(|s| RedoxPath::from_absolute(Cow::Borrowed(s)));
-    canonicalize_using_cwd_checked(
+    let absolute = canonicalize_using_cwd_checked(
         cwd_opt.as_ref(),
         RedoxPath::from_absolute_checked(path)?,
         false,
-    )
+    )?;
+    Some(absolute.into())
 }
 
 /// `canonicalize_using_cwd` but for internal use.
@@ -474,7 +473,7 @@ fn canonicalize_using_cwd_checked<'a, 'b>(
     cwd_opt: Option<&RedoxPath<'a>>,
     path: RedoxPathStr<'b>,
     in_scheme_root: bool,
-) -> Option<Cow<'b, str>> {
+) -> Option<RedoxPath<'b>> {
     let absolute = match (path, in_scheme_root) {
         (Ok(absolute), true) if absolute.get_scheme().is_some() => absolute,
         (Ok(absolute), true) => cwd_opt?.join_checked(absolute.to_standard_checked().to_relative()),
@@ -482,12 +481,7 @@ fn canonicalize_using_cwd_checked<'a, 'b>(
         (Err(relative), true) => cwd_opt?.join_checked(relative.canonical()),
         (Err(relative), false) => cwd_opt?.join_checked(relative),
     };
-    match absolute.canonical() {
-        RedoxPath::Standard(redox_reference) => Some(redox_reference.0),
-        RedoxPath::Legacy(redox_scheme, redox_reference) => {
-            Some(format!("{redox_scheme}:{redox_reference}").into())
-        }
-    }
+    Some(absolute.canonical())
 }
 
 /// Canonicalize as in [`canonicalize_using_cwd`], but Legacy format paths
@@ -496,27 +490,27 @@ pub fn canonicalize_to_standard<'a>(
     cwd_opt: Option<&'a str>,
     path: &'a str,
 ) -> Option<Cow<'a, str>> {
-    Some(match RedoxPath::from_absolute(path) {
-        Some(absolute) => absolute.to_standard_canon(),
+    let absolute = match RedoxPath::from_absolute(path) {
+        Some(absolute) => absolute,
         None => {
             let absolute = RedoxPath::from_absolute(cwd_opt?)?;
-            absolute.join(path)?.to_standard_canon()
+            absolute.join(path)?
         }
-    })
+    };
+    Some(absolute.to_standard_canon().into())
 }
 
 /// [`canonicalize_to_standard`] but for internal use.
-pub fn canonicalize_to_standard_checked<'a, 'b>(
+fn canonicalize_to_standard_checked<'a, 'b>(
     cwd_opt: Option<&RedoxPath<'a>>,
     path: RedoxPathStr<'b>,
-) -> Option<Cow<'b, str>> {
-    Some(
-        match path {
-            Ok(absolute) => absolute,
-            Err(relative) => cwd_opt?.join_checked(relative),
-        }
-        .to_standard_canon(),
-    )
+) -> Option<RedoxReference<'b>> {
+    let path = match path {
+        Ok(absolute) => absolute,
+        Err(relative) => cwd_opt?.join_checked(relative),
+    }
+    .to_standard_canon();
+    Some(RedoxReference(path))
 }
 
 /// Make a path that is relative to the root of a scheme into a full path,
@@ -524,26 +518,23 @@ pub fn canonicalize_to_standard_checked<'a, 'b>(
 ///
 /// Returns the Some if a valid path can be constructed,
 /// None if the scheme name is not valid or some other error occurs.
-/// The returned value is guaranteed to be standard, but not guaranteed to be the given scheme.
+/// The returned value is guaranteed to be UNIX, but not guaranteed to be equal with given scheme.
 pub fn canonicalize_using_scheme<'a>(scheme: &'a str, path: &'a str) -> Option<Cow<'a, str>> {
     let path = RedoxPath::from_absolute_checked(path)?;
-    Some(canonicalize_using_scheme_checked(
-        &RedoxScheme::new(scheme)?,
-        path,
-    ))
+    Some(canonicalize_using_scheme_checked(&RedoxScheme::new(scheme)?, path).into())
 }
 
 /// [`canonicalize_using_scheme`] but for internal use.
 fn canonicalize_using_scheme_checked<'a, 'b>(
     scheme: &RedoxScheme<'_>,
     path: RedoxPathStr<'b>,
-) -> Cow<'b, str> {
+) -> RedoxPath<'b> {
     let path = match path {
         Ok(s) => {
-            if s.matches_scheme(&scheme.0) {
+            if !s.is_legacy() && s.matches_scheme(&scheme.0) {
                 // Canonicalized and being in the same scheme, return early
                 // to avoid allocation from scheme_path_checked
-                return s.to_standard();
+                return s;
             }
             Ok(s)
         }
