@@ -24,8 +24,8 @@ impl<'a> RedoxScheme<'a> {
     }
 
     /// Similar to [`canonicalize_using_scheme`]
-    pub fn canonicalize_as_scheme<'b>(&self, path: RedoxReference<'b>) -> RedoxPath<'b> {
-        canonicalize_using_scheme_checked(self, Err(path))
+    pub fn canonicalize_as_scheme<'b>(&self, path: RedoxStr<'b>) -> RedoxPath<'b> {
+        canonicalize_using_scheme_checked(self, path)
     }
 }
 
@@ -75,7 +75,7 @@ impl<'a> RedoxReference<'a> {
 
     /// Join, but checked from NUL
     fn join_checked<'b>(&self, path: RedoxReference<'b>) -> RedoxReference<'b> {
-        if path.0.starts_with('/') {
+        if !path.is_relative() {
             // Absolute path, referenced
             path
         } else if path.0.is_empty() {
@@ -141,7 +141,7 @@ impl<'a> RedoxReference<'a> {
 
     /// Convert [`RedoxReference`] into relative path if it's not already.
     pub fn to_relative(self) -> Self {
-        if !self.0.starts_with('/') {
+        if self.is_relative() {
             return self;
         }
         match self.0 {
@@ -153,7 +153,7 @@ impl<'a> RedoxReference<'a> {
     /// Verify that the reference is canonicalized
     pub fn is_canon(&self) -> bool {
         (self.0.is_empty() || self.0 == "/")
-            || (self.0.starts_with('/')
+            || (!self.is_relative()
                 && self
                     .0
                     .split('/')
@@ -163,6 +163,10 @@ impl<'a> RedoxReference<'a> {
 
     pub fn dirname<'b>(&self) -> RedoxReference<'b> {
         self.join_checked(RedoxReference("..".into())).canonical()
+    }
+
+    pub fn is_relative(&self) -> bool {
+        !self.0.starts_with('/')
     }
 }
 
@@ -192,7 +196,7 @@ impl<'a> RedoxPath<'a> {
     ///
     /// Returns `Some` on success and `None` if the path is not valid
     pub fn from_absolute<S: Into<Cow<'a, str>>>(path: S) -> Option<Self> {
-        Self::from_absolute_checked(path).and_then(|s| s.ok())
+        Self::from_absolute_checked(path).and_then(|s| s.abs())
     }
 
     /// Create a new [`RedoxPath`] from C string, ensuring it is a valid UTF-8
@@ -209,8 +213,25 @@ impl<'a> RedoxPath<'a> {
         Some(r)
     }
 
+    /// Create [`RedoxPath`] from C string, or return relative path if valid
+    fn from_absolute_c_checked<S: Into<&'a CStr>>(path: S) -> Option<RedoxStr<'a>> {
+        let path = path.into();
+        let r = if matches!(path.to_bytes_with_nul().first(), Some(b'/')) {
+            // New /path or /scheme/scheme_name/path format, referenced
+            Self::Standard(RedoxReference::new_from_c(path)?)
+        } else {
+            // Old scheme_name:path format, copied
+            let s = path.to_str().ok()?;
+            match Self::from_absolute_checked(s)? {
+                RedoxStr::Absolute(redox_path) => redox_path,
+                r => return Some(r),
+            }
+        };
+        Some(RedoxStr::Absolute(r))
+    }
+
     /// Create [`RedoxPath`] from absolute path, or return relative path if valid
-    fn from_absolute_checked<S: Into<Cow<'a, str>>>(path: S) -> Option<RedoxPathStr<'a>> {
+    fn from_absolute_checked<S: Into<Cow<'a, str>>>(path: S) -> Option<RedoxStr<'a>> {
         let path = path.into();
         let r = if path.starts_with('/') {
             // New /path or /scheme/scheme_name/path format, referenced
@@ -221,13 +242,13 @@ impl<'a> RedoxPath<'a> {
             let (first, second) = match (parts.next(), parts.next()) {
                 (Some(a), Some(b)) => (a, b),
                 // Neither an old scheme, so it's relative
-                _ => return Some(Err(RedoxReference::new(path)?)),
+                _ => return Some(RedoxStr::Relative(RedoxReference::new(path)?)),
             };
             let scheme = RedoxScheme::new(first.to_string())?;
             let reference = RedoxReference::new(second.to_string())?;
             Self::Legacy(scheme, reference)
         };
-        Some(Ok(r))
+        Some(RedoxStr::Absolute(r))
     }
 
     /// Join a [`RedoxPath`] with a &str path. Relative paths will be appended to self,
@@ -239,7 +260,7 @@ impl<'a> RedoxPath<'a> {
     }
 
     fn join_checked<'b>(&self, path: RedoxReference<'b>) -> RedoxPath<'b> {
-        if path.0.starts_with('/') {
+        if !path.is_relative() {
             // Absolute path, replaces reference
             RedoxPath::Standard(path)
         } else {
@@ -385,13 +406,13 @@ impl<'a> RedoxPath<'a> {
 
     /// Format a [`RedoxPath`] into a UNIX style path,
     /// ensuring it is canonicalized
-    pub fn to_standard_canon(self) -> Cow<'a, str> {
+    pub fn to_standard_canon(self) -> RedoxPath<'a> {
         match self {
-            RedoxPath::Standard(reference) => reference.canonical().0,
-            RedoxPath::Legacy(scheme, reference) => {
-                canonicalize_using_scheme_checked(&scheme, Ok(RedoxPath::Standard(reference)))
-                    .into()
-            }
+            RedoxPath::Standard(reference) => RedoxPath::Standard(reference.canonical()),
+            RedoxPath::Legacy(scheme, reference) => canonicalize_using_scheme_checked(
+                &scheme,
+                RedoxStr::Absolute(RedoxPath::Standard(reference)),
+            ),
         }
     }
 
@@ -406,15 +427,15 @@ impl<'a> RedoxPath<'a> {
     }
 
     /// Similar to [`canonicalize_using_cwd`]
-    pub fn canonicalize_as_cwd<'b>(&self, path: RedoxReference<'b>) -> RedoxPath<'b> {
+    pub fn canonicalize_as_cwd<'b>(&self, path: RedoxStr<'b>) -> RedoxPath<'b> {
         // SAFETY: canonicalize_using_cwd_checked will None only if cwd_opt is None
-        canonicalize_using_cwd_checked(Some(self), Err(path), false).unwrap()
+        canonicalize_using_cwd_checked(Some(self), path, false).unwrap()
     }
 
     /// Similar to [`canonicalize_to_standard`]
-    pub fn canonicalize_as_cwd_standard<'b>(&self, path: RedoxReference<'b>) -> RedoxReference<'b> {
+    pub fn canonicalize_as_cwd_standard<'b>(&self, path: RedoxStr<'b>) -> RedoxPath<'b> {
         // SAFETY: canonicalize_to_standard_checked will None only if cwd_opt is None
-        canonicalize_to_standard_checked(Some(self), Err(path)).unwrap()
+        canonicalize_to_standard_checked(Some(self), path).unwrap()
     }
 }
 
@@ -440,8 +461,53 @@ impl<'a> From<RedoxPath<'a>> for Cow<'a, str> {
     }
 }
 
-/// A valid path (checked against NUL) that can be absolute or relative
-type RedoxPathStr<'a> = Result<RedoxPath<'a>, RedoxReference<'a>>;
+/// A valid path (checked against NUL) that can be fully qualified [`RedoxPath`] or relative [`RedoxReference`]
+pub enum RedoxStr<'a> {
+    Absolute(RedoxPath<'a>),
+    Relative(RedoxReference<'a>),
+}
+
+impl<'a> RedoxStr<'a> {
+    /// Create a [`RedoxStr`] from a string, returns [`None`] if it contains NUL
+    pub fn new<S: Into<Cow<'a, str>>>(path: S) -> Option<RedoxStr<'a>> {
+        RedoxPath::from_absolute_checked(path)
+    }
+    /// Create a [`RedoxStr`] from a string, returns [`None`] if it not a valid UTF-8
+    pub fn new_c<S: Into<&'a CStr>>(path: S) -> Option<RedoxStr<'a>> {
+        RedoxPath::from_absolute_c_checked(path)
+    }
+    /// Get the absolute path
+    pub fn abs(self) -> Option<RedoxPath<'a>> {
+        match self {
+            RedoxStr::Absolute(redox_path) => Some(redox_path),
+            _ => None,
+        }
+    }
+    /// Get the relative path
+    pub fn rel(self) -> Option<RedoxReference<'a>> {
+        match self {
+            RedoxStr::Relative(redox_reference) => Some(redox_reference),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> From<RedoxPath<'a>> for RedoxStr<'a> {
+    fn from(value: RedoxPath<'a>) -> Self {
+        Self::Absolute(value)
+    }
+}
+
+impl<'a> From<RedoxReference<'a>> for RedoxStr<'a> {
+    fn from(value: RedoxReference<'a>) -> Self {
+        // try to check if it absolute
+        if !value.is_relative() {
+            RedoxStr::Absolute(RedoxPath::Standard(value))
+        } else {
+            RedoxStr::Relative(value)
+        }
+    }
+}
 
 /// Make a relative path absolute using an optional current working directory.
 ///
@@ -471,15 +537,17 @@ pub fn canonicalize_using_cwd<'a>(cwd_opt: Option<&'a str>, path: &'a str) -> Op
 ///  openat RESOLVE_IN_ROOT but still allowing access to other scheme root.
 fn canonicalize_using_cwd_checked<'a, 'b>(
     cwd_opt: Option<&RedoxPath<'a>>,
-    path: RedoxPathStr<'b>,
+    path: RedoxStr<'b>,
     in_scheme_root: bool,
 ) -> Option<RedoxPath<'b>> {
     let absolute = match (path, in_scheme_root) {
-        (Ok(absolute), true) if absolute.get_scheme().is_some() => absolute,
-        (Ok(absolute), true) => cwd_opt?.join_checked(absolute.to_standard_checked().to_relative()),
-        (Ok(absolute), false) => absolute,
-        (Err(relative), true) => cwd_opt?.join_checked(relative.canonical()),
-        (Err(relative), false) => cwd_opt?.join_checked(relative),
+        (RedoxStr::Absolute(absolute), true) if absolute.get_scheme().is_some() => absolute,
+        (RedoxStr::Absolute(absolute), true) => {
+            cwd_opt?.join_checked(absolute.to_standard_checked().to_relative())
+        }
+        (RedoxStr::Absolute(absolute), false) => absolute,
+        (RedoxStr::Relative(relative), true) => cwd_opt?.join_checked(relative.canonical()),
+        (RedoxStr::Relative(relative), false) => cwd_opt?.join_checked(relative),
     };
     Some(absolute.canonical())
 }
@@ -503,14 +571,14 @@ pub fn canonicalize_to_standard<'a>(
 /// [`canonicalize_to_standard`] but for internal use.
 fn canonicalize_to_standard_checked<'a, 'b>(
     cwd_opt: Option<&RedoxPath<'a>>,
-    path: RedoxPathStr<'b>,
-) -> Option<RedoxReference<'b>> {
+    path: RedoxStr<'b>,
+) -> Option<RedoxPath<'b>> {
     let path = match path {
-        Ok(absolute) => absolute,
-        Err(relative) => cwd_opt?.join_checked(relative),
+        RedoxStr::Absolute(absolute) => absolute,
+        RedoxStr::Relative(relative) => cwd_opt?.join_checked(relative),
     }
     .to_standard_canon();
-    Some(RedoxReference(path))
+    Some(path)
 }
 
 /// Make a path that is relative to the root of a scheme into a full path,
@@ -527,16 +595,16 @@ pub fn canonicalize_using_scheme<'a>(scheme: &'a str, path: &'a str) -> Option<C
 /// [`canonicalize_using_scheme`] but for internal use.
 fn canonicalize_using_scheme_checked<'a, 'b>(
     scheme: &RedoxScheme<'_>,
-    path: RedoxPathStr<'b>,
+    path: RedoxStr<'b>,
 ) -> RedoxPath<'b> {
     let path = match path {
-        Ok(s) => {
+        RedoxStr::Absolute(s) => {
             if !s.is_legacy() && s.matches_scheme(&scheme.0) {
                 // Canonicalized and being in the same scheme, return early
                 // to avoid allocation from scheme_path_checked
                 return s;
             }
-            Ok(s)
+            RedoxStr::Absolute(s)
         }
         path => path,
     };
@@ -986,25 +1054,29 @@ mod tests {
         assert_eq!(
             &RedoxPath::from_absolute("foo:bar/../bar2")
                 .unwrap()
-                .to_standard_canon(),
+                .to_standard_canon()
+                .to_string(),
             "/scheme/foo/bar2"
         );
         assert_eq!(
             &RedoxPath::from_absolute("file:bar/./../bar2")
                 .unwrap()
-                .to_standard_canon(),
+                .to_standard_canon()
+                .to_string(),
             "/scheme/file/bar2"
         );
         assert_eq!(
             &RedoxPath::from_absolute("/scheme/file/bar/./../../foo/bar")
                 .unwrap()
-                .to_standard_canon(),
+                .to_standard_canon()
+                .to_string(),
             "/scheme/foo/bar"
         );
         assert_eq!(
             &RedoxPath::from_absolute("/foo/bar")
                 .unwrap()
-                .to_standard_canon(),
+                .to_standard_canon()
+                .to_string(),
             "/foo/bar"
         );
         assert_eq!(
