@@ -2,7 +2,11 @@
 
 extern crate alloc;
 
-use alloc::{borrow::Cow, format, string::ToString};
+use alloc::{
+    borrow::Cow,
+    format,
+    string::{String, ToString},
+};
 use core::{ffi::CStr, fmt};
 
 /// The default scheme. Currently hardcoded.
@@ -26,6 +30,10 @@ impl<'a> RedoxScheme<'a> {
     /// Similar to [`canonicalize_using_scheme`]
     pub fn canonicalize_as_scheme<'b>(&self, path: RedoxStr<'b>) -> RedoxPath<'b> {
         canonicalize_using_scheme_checked(self, path)
+    }
+
+    pub fn into_owned<'b>(self) -> RedoxScheme<'b> {
+        RedoxScheme(self.0.into_owned().into())
     }
 }
 
@@ -74,7 +82,7 @@ impl<'a> RedoxReference<'a> {
     }
 
     /// Join, but checked from NUL
-    fn join_checked<'b>(&self, path: RedoxReference<'b>) -> RedoxReference<'b> {
+    pub fn join_checked<'b>(&self, path: RedoxReference<'b>) -> RedoxReference<'b> {
         if !path.is_relative() {
             // Absolute path, referenced
             path
@@ -126,7 +134,10 @@ impl<'a> RedoxReference<'a> {
             if canonalized {
                 return self;
             }
-            let mut string = if is_absolute { "/" } else { "" }.to_string();
+            let mut string = String::with_capacity(self.0.len());
+            if is_absolute {
+                string.push('/');
+            }
             for (i, part) in parts[..parts_len].iter().enumerate() {
                 if i > 0 {
                     string.push('/');
@@ -161,12 +172,20 @@ impl<'a> RedoxReference<'a> {
                     .all(|seg| seg != ".." && seg != "." && seg != ""))
     }
 
+    /// Get path upward one time
     pub fn dirname<'b>(&self) -> RedoxReference<'b> {
+        // TODO: canonical() recreates a new string
         self.join_checked(RedoxReference("..".into())).canonical()
     }
 
+    /// Is this path relative?
     pub fn is_relative(&self) -> bool {
         !self.0.starts_with('/')
+    }
+
+    /// Copy the content into owned
+    pub fn into_owned<'b>(self) -> RedoxReference<'b> {
+        RedoxReference(self.0.into_owned().into())
     }
 }
 
@@ -179,6 +198,12 @@ impl<'a> AsRef<str> for RedoxReference<'a> {
 impl<'a> fmt::Display for RedoxReference<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl<'a> From<RedoxReference<'a>> for Cow<'a, str> {
+    fn from(value: RedoxReference<'a>) -> Self {
+        value.0
     }
 }
 
@@ -201,33 +226,28 @@ impl<'a> RedoxPath<'a> {
 
     /// Create a new [`RedoxPath`] from C string, ensuring it is a valid UTF-8
     pub fn from_absolute_c<S: Into<&'a CStr>>(path: S) -> Option<Self> {
-        let path = path.into();
-        let r = if matches!(path.to_bytes_with_nul().first(), Some(b'/')) {
-            // New /path or /scheme/scheme_name/path format, referenced
-            Self::Standard(RedoxReference::new_from_c(path)?)
-        } else {
-            // Old scheme_name:path format, copied
-            let s = path.to_str().ok()?;
-            Self::from_absolute(s)?
-        };
-        Some(r)
+        Self::from_absolute_c_checked(path).and_then(|s| s.abs())
+    }
+
+    /// Create a new [`RedoxPath`] from [`RedoxReference`] if the reference is absolute
+    pub fn from_reference(path: RedoxReference<'a>) -> Option<Self> {
+        RedoxStr::from(path).abs()
     }
 
     /// Create [`RedoxPath`] from C string, or return relative path if valid
     fn from_absolute_c_checked<S: Into<&'a CStr>>(path: S) -> Option<RedoxStr<'a>> {
         let path = path.into();
-        let r = if matches!(path.to_bytes_with_nul().first(), Some(b'/')) {
+        if matches!(path.to_bytes_with_nul().first(), Some(b'/')) {
             // New /path or /scheme/scheme_name/path format, referenced
-            Self::Standard(RedoxReference::new_from_c(path)?)
+            Some(RedoxStr::Absolute(Self::Standard(
+                RedoxReference::new_from_c(path)?,
+            )))
         } else {
-            // Old scheme_name:path format, copied
+            // Old scheme_name:path (copied) or relative format (referenced)
             let s = path.to_str().ok()?;
-            match Self::from_absolute_checked(s)? {
-                RedoxStr::Absolute(redox_path) => redox_path,
-                r => return Some(r),
-            }
-        };
-        Some(RedoxStr::Absolute(r))
+            // TODO: A way to skip NUL check here
+            Self::from_absolute_checked(s)
+        }
     }
 
     /// Create [`RedoxPath`] from absolute path, or return relative path if valid
@@ -237,13 +257,13 @@ impl<'a> RedoxPath<'a> {
             // New /path or /scheme/scheme_name/path format, referenced
             Self::Standard(RedoxReference::new(path)?)
         } else {
-            // Old scheme_name:path format, copied
             let mut parts = path.as_ref().splitn(2, ':');
             let (first, second) = match (parts.next(), parts.next()) {
                 (Some(a), Some(b)) => (a, b),
-                // Neither an old scheme, so it's relative
+                // Neither an old scheme, so it's relative, referenced
                 _ => return Some(RedoxStr::Relative(RedoxReference::new(path)?)),
             };
+            // Old scheme_name:path format, copied
             let scheme = RedoxScheme::new(first.to_string())?;
             let reference = RedoxReference::new(second.to_string())?;
             Self::Legacy(scheme, reference)
@@ -259,7 +279,8 @@ impl<'a> RedoxPath<'a> {
         Some(self.join_checked(RedoxReference::new(path)?))
     }
 
-    fn join_checked<'b>(&self, path: RedoxReference<'b>) -> RedoxPath<'b> {
+    /// Join, but checked from NUL
+    pub fn join_checked<'b>(&self, path: RedoxReference<'b>) -> RedoxPath<'b> {
         if !path.is_relative() {
             // Absolute path, replaces reference
             RedoxPath::Standard(path)
@@ -416,6 +437,7 @@ impl<'a> RedoxPath<'a> {
         }
     }
 
+    /// Get path upward one time
     pub fn dirname<'b>(&self) -> RedoxPath<'b> {
         match self {
             RedoxPath::Standard(redox_reference) => RedoxPath::Standard(redox_reference.dirname()),
@@ -423,6 +445,22 @@ impl<'a> RedoxPath<'a> {
                 RedoxScheme(redox_scheme.to_string().into()),
                 redox_reference.dirname(),
             ),
+        }
+    }
+
+    /// Convert into [`RedoxReference`], if it an old scheme, the scheme part will be discarded.
+    pub fn to_reference(self) -> RedoxReference<'a> {
+        match self {
+            RedoxPath::Standard(redox_reference) => redox_reference,
+            RedoxPath::Legacy(_, redox_reference) => redox_reference,
+        }
+    }
+
+    /// Get [`RedoxReference`], if it an old scheme, the scheme part will be discarded.
+    pub fn as_reference(&self) -> &RedoxReference<'a> {
+        match self {
+            RedoxPath::Standard(redox_reference) => redox_reference,
+            RedoxPath::Legacy(_, redox_reference) => redox_reference,
         }
     }
 
@@ -436,6 +474,18 @@ impl<'a> RedoxPath<'a> {
     pub fn canonicalize_as_cwd_standard<'b>(&self, path: RedoxStr<'b>) -> RedoxPath<'b> {
         // SAFETY: canonicalize_to_standard_checked will None only if cwd_opt is None
         canonicalize_to_standard_checked(Some(self), path).unwrap()
+    }
+
+    /// Copy the content into owned
+    pub fn into_owned<'b>(self) -> RedoxPath<'b> {
+        match self {
+            RedoxPath::Standard(redox_reference) => {
+                RedoxPath::Standard(redox_reference.into_owned())
+            }
+            RedoxPath::Legacy(redox_scheme, redox_reference) => {
+                RedoxPath::Legacy(redox_scheme.into_owned(), redox_reference.into_owned())
+            }
+        }
     }
 }
 
@@ -462,6 +512,7 @@ impl<'a> From<RedoxPath<'a>> for Cow<'a, str> {
 }
 
 /// A valid path (checked against NUL) that can be fully qualified [`RedoxPath`] or relative [`RedoxReference`]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum RedoxStr<'a> {
     Absolute(RedoxPath<'a>),
     Relative(RedoxReference<'a>),
@@ -490,6 +541,47 @@ impl<'a> RedoxStr<'a> {
             _ => None,
         }
     }
+    /// Is this path canonicalized?
+    pub fn is_canon(&self) -> bool {
+        match self {
+            RedoxStr::Absolute(redox_path) => redox_path.is_canon(),
+            RedoxStr::Relative(redox_reference) => redox_reference.is_canon(),
+        }
+    }
+    /// Convert into canonicalized path
+    pub fn canonical(self) -> Self {
+        match self {
+            RedoxStr::Absolute(redox_path) => RedoxStr::from(redox_path.canonical()),
+            RedoxStr::Relative(redox_reference) => RedoxStr::from(redox_reference.canonical()),
+        }
+    }
+    /// Get path upward one time
+    pub fn dirname<'b>(&self) -> RedoxStr<'b> {
+        match self {
+            RedoxStr::Absolute(redox_path) => RedoxStr::from(redox_path.dirname()),
+            RedoxStr::Relative(redox_reference) => RedoxStr::from(redox_reference.dirname()),
+        }
+    }
+    /// This is path empty?
+    pub fn is_empty(&self) -> bool {
+        match self {
+            RedoxStr::Absolute(_) => false, // Absolute path always have `/` for POSIX path or `:` for legacy path
+            RedoxStr::Relative(redox_reference) => redox_reference.as_ref().is_empty(),
+        }
+    }
+    /// Is this path relative?
+    pub fn is_relative(&self) -> bool {
+        // Does no need to check RedoxReference::is_relative because it's checked from From or new function
+        matches!(self, RedoxStr::Relative(_))
+    }
+
+    /// Copy the content into owned
+    pub fn into_owned<'b>(self) -> RedoxStr<'b> {
+        match self {
+            RedoxStr::Absolute(redox_path) => RedoxStr::Absolute(redox_path.into_owned()),
+            RedoxStr::Relative(redox_reference) => RedoxStr::Relative(redox_reference.into_owned()),
+        }
+    }
 }
 
 impl<'a> From<RedoxPath<'a>> for RedoxStr<'a> {
@@ -505,6 +597,14 @@ impl<'a> From<RedoxReference<'a>> for RedoxStr<'a> {
             RedoxStr::Absolute(RedoxPath::Standard(value))
         } else {
             RedoxStr::Relative(value)
+        }
+    }
+}
+impl<'a> From<RedoxStr<'a>> for Cow<'a, str> {
+    fn from(value: RedoxStr<'a>) -> Self {
+        match value {
+            RedoxStr::Absolute(redox_path) => redox_path.into(),
+            RedoxStr::Relative(redox_reference) => redox_reference.into(),
         }
     }
 }
