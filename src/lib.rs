@@ -258,13 +258,13 @@ impl<'a> RedoxPath<'a> {
             Self::Standard(RedoxReference::new(path)?)
         } else {
             let mut parts = path.as_ref().splitn(2, ':');
-            let (first, second) = match (parts.next(), parts.next()) {
+            let (first, second) = match (parts.next().and_then(RedoxScheme::new), parts.next()) {
                 (Some(a), Some(b)) => (a, b),
                 // Neither an old scheme, so it's relative, referenced
                 _ => return Some(RedoxStr::Relative(RedoxReference::new(path)?)),
             };
             // Old scheme_name:path format, copied
-            let scheme = RedoxScheme::new(first.to_string())?;
+            let scheme = first.into_owned();
             let reference = RedoxReference::new(second.to_string())?;
             Self::Legacy(scheme, reference)
         };
@@ -336,40 +336,30 @@ impl<'a> RedoxPath<'a> {
 
     fn get_scheme_prefixed(&'a self, fallback: bool) -> Option<(RedoxScheme<'a>, &'a str)> {
         const SCHEME_PREFIX_LENGTH: usize = "/scheme/".len();
-        if !self.is_canon() {
-            return None;
-        }
         match self {
             Self::Standard(reference) => {
                 let mut parts = reference.0.split('/');
-                loop {
+                if parts.next() == Some("") && parts.next() == Some("scheme") {
                     match parts.next() {
-                        Some("") => {
-                            // Ignore empty parts
-                        }
-                        Some("scheme") => match parts.next() {
-                            Some(scheme_name) => {
-                                // Path is in /scheme/scheme_name
-                                let scheme_length = SCHEME_PREFIX_LENGTH + scheme_name.len() + 1;
-                                let remainder = reference.0.get(scheme_length..).unwrap_or("");
+                        Some(scheme_name) => {
+                            // Path is in /scheme/scheme_name
+                            let scheme_length = SCHEME_PREFIX_LENGTH + scheme_name.len() + 1;
+                            let remainder = reference.0.get(scheme_length..).unwrap_or("");
 
-                                return Some((RedoxScheme::new(scheme_name)?, remainder));
-                            }
-                            None => {
-                                // Path is the root scheme
-                                return Some((RedoxScheme(Cow::from("")), ""));
-                            }
-                        },
-                        _ => {
-                            if !fallback {
-                                return None;
-                            }
-                            // If path has no special processing, it is inside the file scheme
-                            let remainder = reference.0.get(1..).unwrap_or("");
-                            return Some((RedoxScheme(Cow::from(DEFAULT_SCHEME)), remainder));
+                            return Some((RedoxScheme::new(scheme_name)?, remainder));
+                        }
+                        None => {
+                            // Path is the root scheme
+                            return Some((RedoxScheme(Cow::from("")), ""));
                         }
                     }
                 }
+                if !fallback {
+                    return None;
+                }
+                // If path has no special processing, it is inside the file scheme
+                let remainder = reference.0.get(1..).unwrap_or("");
+                return Some((RedoxScheme(Cow::from(DEFAULT_SCHEME)), remainder));
             }
             Self::Legacy(scheme, reference) => {
                 // Legacy paths are already split
@@ -430,10 +420,9 @@ impl<'a> RedoxPath<'a> {
     pub fn to_standard_canon(self) -> RedoxPath<'a> {
         match self {
             RedoxPath::Standard(reference) => RedoxPath::Standard(reference.canonical()),
-            RedoxPath::Legacy(scheme, reference) => canonicalize_using_scheme_checked(
-                &scheme,
-                RedoxStr::Absolute(RedoxPath::Standard(reference)),
-            ),
+            RedoxPath::Legacy(scheme, reference) => {
+                canonicalize_using_scheme_checked(&scheme, RedoxStr::Relative(reference))
+            }
         }
     }
 
@@ -1008,6 +997,10 @@ mod tests {
             ("/", "file", ""),
             ("/bar", "file", "bar"),
             ("/...", "file", "..."),
+            ("//double/slash", "file", "/double/slash"),
+            ("/ending/in/slash/", "file", "ending/in/slash/"),
+            ("/contains/dot/.", "file", "contains/dot/."),
+            ("/contains/dotdot/..", "file", "contains/dotdot/.."),
         ] {
             let redox_path = RedoxPath::from_absolute(path).unwrap();
             let parts = redox_path.as_parts();
@@ -1037,13 +1030,7 @@ mod tests {
         assert_eq!(RedoxPath::from_absolute("not/absolute"), None);
 
         // fail if the scheme is not properly canonicalized
-        for path in [
-            "//double/slash",
-            "/ending/in/slash/",
-            "/scheme/use:colon/",
-            "/contains/dot/.",
-            "/contains/dotdot/..",
-        ] {
+        for path in ["/scheme/use:colon/"] {
             let redox_path = RedoxPath::from_absolute(path).unwrap();
             let parts = redox_path.as_parts();
             assert_eq!((path, parts), (path, None));
@@ -1189,7 +1176,7 @@ mod tests {
         );
         assert_eq!(
             &canonicalize_to_standard(None, "foo:bar/../..").unwrap(),
-            "/scheme"
+            "/scheme/foo"
         );
         assert_eq!(
             &canonicalize_to_standard(None, "/scheme/foo/bar/..").unwrap(),
