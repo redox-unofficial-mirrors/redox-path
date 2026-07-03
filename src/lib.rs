@@ -100,57 +100,122 @@ impl<'a> RedoxReference<'a> {
         }
     }
 
-    /// Canonicalize [`RedoxReference`], removing `.` and `..`.
-    /// For compability with legacy scheme, a relative path will be remain relative.
+    /// Canonicalize [`RedoxReference`], removing `.`, `..` and empty subpaths.
+    /// In this function, relative path will be remain relative and the path remain not canon.
+    ///
+    /// Paths that goes upward beyond the root path will be truncated
+    /// i.e. `/..` converted to `/` and `../foo/` converted to `foo`.
     pub fn canonical(self) -> Self {
-        let canonical = {
-            let mut canonalized = true;
-            let mut is_absolute = false;
-            let mut parts = [""; 4096]; // PATH_MAX
-            let mut parts_len = 0;
-            for (i, part) in self.0.split('/').enumerate() {
-                if part.is_empty() {
-                    if i == 0 {
-                        is_absolute = true;
-                    } else {
-                        canonalized = false;
-                    }
-                } else if part == "." {
-                    canonalized = false;
-                } else if part == ".." {
-                    if parts_len > 0 {
-                        parts_len -= 1;
-                    }
-                    canonalized = false;
+        let mut canonicalized = true;
+        let mut is_absolute = false;
+        let mut parts = [""; 4096]; // PATH_MAX
+        let mut parts_len = 0;
+        for (i, part) in self.0.split('/').enumerate() {
+            if part.is_empty() {
+                if i == 0 {
+                    is_absolute = true;
                 } else {
-                    if parts_len >= 4096 {
-                        break;
-                    }
-                    parts[parts_len] = part;
-                    parts_len += 1;
+                    canonicalized = false;
                 }
+            } else if part == "." {
+                canonicalized = false;
+            } else if part == ".." {
+                if parts_len > 0 {
+                    parts_len -= 1;
+                }
+                canonicalized = false;
+            } else {
+                if parts_len >= 4096 {
+                    break;
+                }
+                parts[parts_len] = part;
+                parts_len += 1;
             }
+        }
 
-            if canonalized {
-                return self;
-            }
-            let mut string = String::with_capacity(self.0.len());
-            if is_absolute {
+        if canonicalized {
+            return self;
+        }
+        let mut string = String::with_capacity(self.0.len());
+        if is_absolute {
+            string.push('/');
+        }
+        for (i, part) in parts[..parts_len].iter().enumerate() {
+            if i > 0 {
                 string.push('/');
             }
-            for (i, part) in parts[..parts_len].iter().enumerate() {
-                if i > 0 {
-                    string.push('/');
-                }
-                string.push_str(part);
-            }
-            string
-        };
+            string.push_str(part);
+        }
+
         // Does not use ::new() as &self is checked from NUL
-        Self(Cow::Owned(canonical))
+        Self(Cow::Owned(string))
+    }
+
+    /// Normalize [`RedoxReference`], removing `.`, `..` (if possible) and empty subpaths.
+    /// This function will return [`None`] if the path is absolute or escapes root.
+    ///
+    /// This function is useful to validate if the path still remain in scope within root.
+    /// To make this works within symlink, `max_upward` is provided, and also returning an integer
+    /// for next `canonical_max_upward(max_upward)`. The amount of `..` will never exceed `max_upward`.
+    pub fn canonical_max_upward(self, max_upward: usize) -> Option<(Self, usize)> {
+        let mut canonicalized = true;
+        let mut parts = [""; 4096]; // PATH_MAX
+        let mut parts_len = 0;
+        let mut upward_depth = 0;
+        for (i, part) in self.0.split('/').enumerate() {
+            if part.is_empty() {
+                if i == 0 {
+                    // absolute path
+                    return None;
+                }
+                canonicalized = false;
+            } else if part == "." {
+                canonicalized = false;
+            } else if part == ".." {
+                if parts_len == 0 {
+                    upward_depth += 1;
+                    if upward_depth > max_upward {
+                        // escapes root
+                        return None;
+                    }
+                } else {
+                    parts_len -= 1;
+                }
+
+                canonicalized = false;
+            } else {
+                if parts_len + upward_depth >= 4096 {
+                    break;
+                }
+                parts[parts_len] = part;
+                parts_len += 1;
+            }
+        }
+
+        if canonicalized {
+            return Some((self, max_upward + parts_len));
+        }
+        let mut string = String::with_capacity(self.0.len());
+        for _ in 0..upward_depth {
+            if !string.is_empty() {
+                string.push('/');
+            }
+            string.push_str("..");
+        }
+        for part in parts[..parts_len].iter() {
+            if !string.is_empty() {
+                string.push('/');
+            }
+            string.push_str(part);
+        }
+
+        // Does not use ::new() as &self is checked from NUL
+        Some((Self(string.into()), max_upward + parts_len - upward_depth))
     }
 
     /// Convert [`RedoxReference`] into relative path if it's not already.
+    ///
+    /// Converting the path to relative allows using [`Self::canonical_max_upward`]
     pub fn to_relative(self) -> Self {
         if self.is_relative() {
             return self;
@@ -275,7 +340,8 @@ impl<'a> RedoxPath<'a> {
     /// absolute paths will be returned as a RedoxPath, ignoring self.
     ///
     /// Returns `Some` on success and `None` if the path is not valid
-    pub fn join<'b>(&self, path: &'b str) -> Option<RedoxPath<'b>> {
+    pub fn join<'b, S: Into<Cow<'b, str>>>(&self, path: S) -> Option<RedoxPath<'b>> {
+        let path = path.into();
         Some(self.join_checked(RedoxReference::new(path)?))
     }
 
@@ -295,7 +361,7 @@ impl<'a> RedoxPath<'a> {
         }
     }
 
-    /// Canonicalize path, removing `.` and `..`.
+    /// Canonicalize path, see [`RedoxReference::canonical`]
     pub fn canonical(self) -> Self {
         match self {
             Self::Standard(reference) => Self::Standard(reference.canonical()),
@@ -465,6 +531,17 @@ impl<'a> RedoxPath<'a> {
         canonicalize_to_standard_checked(Some(self), path).unwrap()
     }
 
+    /// Similar to [`canonicalize_using_cwd_with_max_upward`]
+    pub fn canonicalize_as_cwd_with_max_upward<'b>(
+        &self,
+        relpath: RedoxReference<'b>,
+        max_upward: usize,
+    ) -> Option<(RedoxPath<'b>, usize)> {
+        let (relpath, max_upward) = relpath.canonical_max_upward(max_upward)?;
+        let newpath = self.join_checked(relpath);
+        Some((newpath, max_upward))
+    }
+
     /// Copy the content into owned
     pub fn into_owned<'b>(self) -> RedoxPath<'b> {
         match self {
@@ -558,6 +635,24 @@ impl<'a> RedoxStr<'a> {
             RedoxStr::Relative(redox_reference) => redox_reference.as_ref().is_empty(),
         }
     }
+    /// Join two path
+    pub fn join<'b, S: Into<Cow<'b, str>>>(&self, path: S) -> Option<RedoxStr<'b>> {
+        match self {
+            RedoxStr::Absolute(redox_path) => Some(RedoxStr::from(redox_path.join(path)?)),
+            RedoxStr::Relative(redox_reference) => {
+                Some(RedoxStr::from(redox_reference.join(path)?))
+            }
+        }
+    }
+    /// Join two path
+    pub fn join_checked<'b>(&self, path: RedoxReference<'b>) -> RedoxStr<'b> {
+        match self {
+            RedoxStr::Absolute(redox_path) => RedoxStr::from(redox_path.join_checked(path)),
+            RedoxStr::Relative(redox_reference) => {
+                RedoxStr::from(redox_reference.join_checked(path))
+            }
+        }
+    }
     /// Is this path relative?
     pub fn is_relative(&self) -> bool {
         // Does no need to check RedoxReference::is_relative because it's checked from From or new function
@@ -642,7 +737,7 @@ fn canonicalize_using_cwd_checked<'a, 'b>(
 }
 
 /// Canonicalize as in [`canonicalize_using_cwd`], but Legacy format paths
-/// are canonicalized into UNIX format
+/// are canonicalized into UNIX format.
 pub fn canonicalize_to_standard<'a>(
     cwd_opt: Option<&'a str>,
     path: &'a str,
@@ -699,6 +794,35 @@ fn canonicalize_using_scheme_checked<'a, 'b>(
     };
     // SAFETY: canonicalize_using_cwd_checked will only None if cwd_opt is None
     canonicalize_using_cwd_checked(Some(&scheme_path_checked(&scheme)), path, true).unwrap()
+}
+
+/// Make a path that is relative to the root of a scheme into a full path,
+/// following the rules of [`canonicalize_using_cwd`], but with upward_max to ensure
+/// the returned path stays within the true root.
+pub fn canonicalize_using_cwd_with_max_upward<'a>(
+    cwd: &str,
+    relpath: &'a str,
+    max_upward: usize,
+) -> Option<(Cow<'a, str>, usize)> {
+    // Using RedoxStr so cwd using relative path (as in scheme) is also accepted
+    let cwd = RedoxStr::new(Cow::Borrowed(cwd))?;
+    let (absolute, max_upward) = canonicalize_using_cwd_with_max_upward_checked(
+        &cwd,
+        RedoxStr::new(relpath)?.rel()?,
+        max_upward,
+    )?;
+    Some((absolute.into(), max_upward))
+}
+
+/// [`canonicalize_using_cwd_with_max_upward`] but for internal use.
+fn canonicalize_using_cwd_with_max_upward_checked<'a, 'b>(
+    cwd: &RedoxStr<'a>,
+    relpath: RedoxReference<'b>,
+    max_upward: usize,
+) -> Option<(RedoxStr<'b>, usize)> {
+    let (relpath, max_upward) = relpath.canonical_max_upward(max_upward)?;
+    let relnew = cwd.join_checked(relpath);
+    Some((relnew, max_upward))
 }
 
 /// The standard path for a given scheme name
@@ -921,6 +1045,57 @@ mod tests {
         );
     }
 
+    // Tests max upward for symlink
+    #[test]
+    fn test_max_upward() {
+        // new format
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("/", "foo/bar", 0),
+            Some((Cow::Borrowed("/foo/bar"), 2))
+        );
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("/foo/", "bar/../baz/qux", 0),
+            Some((Cow::Borrowed("/foo/baz/qux"), 2))
+        );
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("foo/../bar", "baz/./../qux", 0),
+            Some((Cow::Borrowed("foo/../bar/qux"), 1))
+        );
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("/foo", "../bar", 1),
+            Some((Cow::Borrowed("/foo/../bar"), 1))
+        );
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("foo/..", "../bar/..", 2),
+            Some((Cow::Borrowed("foo/../.."), 1))
+        );
+        // old format
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("foo:", "bar/baz", 0),
+            Some((Cow::Borrowed("foo:bar/baz"), 2))
+        );
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("foo:", "bar/baz//../../", 0),
+            Some((Cow::Borrowed("foo:"), 0))
+        );
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("foo:/bar/..", "baz/./qux/..", 0),
+            Some((Cow::Borrowed("foo:/bar/../baz"), 1))
+        );
+        // neg tests
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("/foo", "../bar", 0),
+            None
+        );
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("/foo", "/bar", 0),
+            None
+        );
+        assert_eq!(
+            canonicalize_using_cwd_with_max_upward("/foo/..", "../bar/..", 0),
+            None
+        );
+    }
     // Test whether paths are borrowed or owned
     #[test]
     fn test_cow_borrowing() {
