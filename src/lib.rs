@@ -60,7 +60,9 @@ impl<'a> RedoxReference<'a> {
     pub fn new<S: Into<Cow<'a, str>>>(reference: S) -> Option<Self> {
         let reference = reference.into();
         // Reference cannot have NUL
-        if reference.contains(&['\0']) {
+        // as_bytes(): https://github.com/rust-lang/rust/issues/158229
+        // this is safe: https://stackoverflow.com/a/6907327/3908409
+        if reference.as_bytes().iter().any(|&b| b == b'\0') {
             return None;
         }
         Some(Self(reference))
