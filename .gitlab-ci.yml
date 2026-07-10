@@ -13,3 +13,4 @@ test:
   image: "rust:latest"
   script:
     - cargo test
+    - cargo test --features simd
