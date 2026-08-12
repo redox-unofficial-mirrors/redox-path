@@ -584,7 +584,7 @@ impl<'a> RedoxStr<'a> {
         } else {
             if let Some((scheme, reference)) = Self::split_scheme(&path) {
                 // Old scheme_name:path format, referenced
-                RedoxPath::Legacy(RedoxScheme::new(scheme)?, RedoxReference::new(reference)?)
+                RedoxPath::Legacy(scheme, RedoxReference::new(reference)?)
             } else {
                 // Neither an old scheme, so it's relative, referenced
                 return Some(RedoxStr::Relative(RedoxReference::new(path)?));
@@ -612,7 +612,7 @@ impl<'a> RedoxStr<'a> {
         }
     }
 
-    /// SAFETY: Caller ensures that `path` contains non NULL
+    /// SAFETY: Caller ensures that `path` contains no NUL character
     pub unsafe fn new_unchecked<S: Into<Cow<'a, str>>>(path: S) -> Self {
         let path = path.into();
         let r = if path.starts_with('/') {
@@ -620,8 +620,8 @@ impl<'a> RedoxStr<'a> {
             RedoxPath::Standard(RedoxReference(path))
         } else {
             if let Some((scheme, reference)) = Self::split_scheme(&path) {
-                // Old scheme_name:path format, referenced or copied
-                RedoxPath::Legacy(RedoxScheme(scheme), RedoxReference(reference))
+                // Old scheme_name:path format, referenced
+                RedoxPath::Legacy(scheme, RedoxReference(reference))
             } else {
                 // Neither an old scheme, so it's relative, referenced
                 return RedoxStr::Relative(RedoxReference(path));
@@ -631,7 +631,7 @@ impl<'a> RedoxStr<'a> {
     }
 
     /// Split with scheme algorithm, retain reference if possible
-    fn split_scheme(path: &Cow<'a, str>) -> Option<(Cow<'a, str>, Cow<'a, str>)> {
+    fn split_scheme(path: &Cow<'a, str>) -> Option<(RedoxScheme<'a>, Cow<'a, str>)> {
         #[cfg(not(feature = "simd"))]
         let i = {
             let mut i = 0;
@@ -655,13 +655,14 @@ impl<'a> RedoxStr<'a> {
                 _ => return None,
             }
         };
-        match path {
-            Cow::Borrowed(s) => Some((s.get(..i)?.into(), s.get(i + 1..)?.into())),
-            Cow::Owned(s) => Some((
+        let (scheme, path): (Cow<'a, str>, Cow<'a, str>) = match path {
+            Cow::Borrowed(s) => (s.get(..i)?.into(), s.get(i + 1..)?.into()),
+            Cow::Owned(s) => (
                 s.get(..i)?.to_string().into(),
                 s.get(i + 1..)?.to_string().into(),
-            )),
-        }
+            ),
+        };
+        Some((RedoxScheme::new(scheme)?, path))
     }
 
     /// Get the absolute path
