@@ -256,8 +256,39 @@ impl<'a> RedoxReference<'a> {
 
     /// Get path upward one time
     pub fn dirname<'b>(&self) -> RedoxReference<'b> {
-        // TODO: canonical() recreates a new string
-        self.join_checked(RedoxReference("..".into())).canonical()
+        self.dirname_split().0.into_owned()
+    }
+
+    /// Get path upward one time and the file name
+    pub fn dirname_split(&'a self) -> (RedoxReference<'a>, Option<RedoxReference<'a>>) {
+        let mut slice = &*self.0;
+        let mut was_upward = false;
+        loop {
+            // SIMD: not eligible, filenames are often short
+            let Some((dir, file)) = slice.rsplit_once('/') else {
+                let file = if matches!(slice, "." | "..") {
+                    None
+                } else {
+                    Some(RedoxReference(slice.into()))
+                };
+                return (RedoxReference("".into()), file);
+            };
+            slice = dir;
+            was_upward = match file {
+                "" | "." => false,
+                ".." => true,
+                _ if was_upward => false,
+                file => {
+                    return (
+                        RedoxReference(slice.into()),
+                        Some(RedoxReference(file.into())),
+                    );
+                }
+            };
+            if slice.is_empty() {
+                return (RedoxReference("/".into()), None);
+            }
+        }
     }
 
     /// Is this path relative?
@@ -1196,6 +1227,18 @@ mod tests {
             assert_eq!(
                 RedoxPath::from_absolute(a).unwrap().dirname(),
                 RedoxPath::from_absolute(b).unwrap()
+            );
+        }
+        for (a, b) in [
+            ("foo/bar/.", "foo"),
+            ("./foo/bar/..", "."),
+            ("./.", ""),
+            (".", ""),
+            ("", ""),
+        ] {
+            assert_eq!(
+                RedoxStr::new(a).unwrap().dirname(),
+                RedoxStr::new(b).unwrap()
             );
         }
     }
