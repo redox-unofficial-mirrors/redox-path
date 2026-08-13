@@ -89,6 +89,16 @@ impl<'a> RedoxReference<'a> {
         Some(Self(Cow::Borrowed(s?)))
     }
 
+    /// Create a [`RedoxReference`] from a buf, returns [`None`] if it not a valid UTF-8 or valid from NUL
+    pub fn new_from_buf(path: &'a [u8], len: usize) -> Option<Self> {
+        let buf = path.get(..len)?;
+        #[cfg(not(feature = "simd"))]
+        let s = str::from_utf8(buf).ok()?;
+        #[cfg(feature = "simd")]
+        let s = simdutf8::basic::from_utf8(buf).ok()?;
+        Self::new(s)
+    }
+
     /// Join a [`RedoxReference`] with a path. Relative paths will be joined, absolute paths will
     /// be returned as-is.
     ///
@@ -301,14 +311,19 @@ pub enum RedoxPath<'a> {
 impl<'a> RedoxPath<'a> {
     /// Create [`RedoxPath`] from absolute path
     ///
-    /// Returns `Some` on success and `None` if the path is not valid
+    /// Returns `Some` on success and `None` if the path contains NUL
     pub fn from_absolute<S: Into<Cow<'a, str>>>(path: S) -> Option<Self> {
-        RedoxStr::new_checked(path).and_then(|s| s.abs())
+        RedoxStr::new(path).and_then(|s| s.abs())
     }
 
     /// Create a new [`RedoxPath`] from C string, ensuring it is a valid UTF-8
     pub fn from_absolute_c<S: Into<&'a CStr>>(path: S) -> Option<Self> {
-        RedoxStr::new_c_checked(path).and_then(|s| s.abs())
+        RedoxStr::new_from_c(path).and_then(|s| s.abs())
+    }
+
+    /// Create a new [`RedoxPath`] from a buffer, ensuring it is a valid UTF-8 and valid from NUL
+    pub fn from_absolute_buf(path: &'a [u8], len: usize) -> Option<Self> {
+        RedoxStr::new_from_buf(path, len).and_then(|s| s.abs())
     }
 
     /// Create a new [`RedoxPath`] from [`RedoxReference`] if the reference is absolute
@@ -567,16 +582,7 @@ pub enum RedoxStr<'a> {
 
 impl<'a> RedoxStr<'a> {
     /// Create a [`RedoxStr`] from a string, returns [`None`] if it contains NUL
-    pub fn new<S: Into<Cow<'a, str>>>(path: S) -> Option<RedoxStr<'a>> {
-        Self::new_checked(path)
-    }
-    /// Create a [`RedoxStr`] from a string, returns [`None`] if it not a valid UTF-8
-    pub fn new_c<S: Into<&'a CStr>>(path: S) -> Option<RedoxStr<'a>> {
-        RedoxStr::new_c_checked(path)
-    }
-
-    /// Internal checked algo
-    fn new_checked<S: Into<Cow<'a, str>>>(path: S) -> Option<Self> {
+    pub fn new<S: Into<Cow<'a, str>>>(path: S) -> Option<Self> {
         let path = path.into();
         let r = if path.starts_with('/') {
             // New /path or /scheme/scheme_name/path format, referenced
@@ -593,8 +599,8 @@ impl<'a> RedoxStr<'a> {
         Some(RedoxStr::Absolute(r))
     }
 
-    /// Create [`RedoxPath`] from C string, or return relative path if valid
-    fn new_c_checked<S: Into<&'a CStr>>(path: S) -> Option<Self> {
+    /// Create a [`RedoxStr`] from a buf, returns [`None`] if it not a valid UTF-8 or valid from NUL
+    fn new_from_c<S: Into<&'a CStr>>(path: S) -> Option<Self> {
         let path = path.into();
         if matches!(path.to_bytes_with_nul().first(), Some(b'/')) {
             // New /path or /scheme/scheme_name/path format
@@ -610,6 +616,16 @@ impl<'a> RedoxStr<'a> {
             // SAFETY: CStr::to_bytes() stop at NUL
             unsafe { Some(RedoxStr::new_unchecked(s)) }
         }
+    }
+
+    /// Create a [`RedoxStr`] from a buf, returns [`None`] if it not a valid UTF-8 or contains NUL
+    pub fn new_from_buf(path: &'a [u8], len: usize) -> Option<RedoxStr<'a>> {
+        let buf = path.get(..len)?;
+        #[cfg(not(feature = "simd"))]
+        let s = str::from_utf8(buf).ok()?;
+        #[cfg(feature = "simd")]
+        let s = simdutf8::basic::from_utf8(buf).ok()?;
+        Self::new(s)
     }
 
     /// SAFETY: Caller ensures that `path` contains no NUL character
@@ -665,6 +681,20 @@ impl<'a> RedoxStr<'a> {
         Some((RedoxScheme::new(scheme)?, path))
     }
 
+    /// Get the reference to absolute path
+    pub fn as_abs(&'a self) -> Option<&'a RedoxPath<'a>> {
+        match self {
+            RedoxStr::Absolute(redox_path) => Some(redox_path),
+            _ => None,
+        }
+    }
+    /// Get the reference to relative path
+    pub fn as_rel(&'a self) -> Option<&'a RedoxReference<'a>> {
+        match self {
+            RedoxStr::Relative(redox_reference) => Some(redox_reference),
+            _ => None,
+        }
+    }
     /// Get the absolute path
     pub fn abs(self) -> Option<RedoxPath<'a>> {
         match self {
@@ -780,8 +810,7 @@ impl<'a> From<RedoxStr<'a>> for Cow<'a, str> {
 /// absolute.
 pub fn canonicalize_using_cwd<'a>(cwd_opt: Option<&'a str>, path: &'a str) -> Option<Cow<'a, str>> {
     let cwd_opt = cwd_opt.and_then(|s| RedoxPath::from_absolute(Cow::Borrowed(s)));
-    let absolute =
-        canonicalize_using_cwd_checked(cwd_opt.as_ref(), RedoxStr::new_checked(path)?, false)?;
+    let absolute = canonicalize_using_cwd_checked(cwd_opt.as_ref(), RedoxStr::new(path)?, false)?;
     Some(absolute.into())
 }
 
@@ -841,7 +870,7 @@ fn canonicalize_to_standard_checked<'a, 'b>(
 /// None if the scheme name is not valid or some other error occurs.
 /// The returned value is guaranteed to be UNIX, but not guaranteed to be equal with given scheme.
 pub fn canonicalize_using_scheme<'a>(scheme: &'a str, path: &'a str) -> Option<Cow<'a, str>> {
-    let path = RedoxStr::new_checked(path)?;
+    let path = RedoxStr::new(path)?;
     Some(canonicalize_using_scheme_checked(&RedoxScheme::new(scheme)?, path).into())
 }
 
