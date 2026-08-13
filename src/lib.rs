@@ -12,6 +12,9 @@ use core::{ffi::CStr, fmt};
 /// The default scheme. Currently hardcoded.
 const DEFAULT_SCHEME: &str = "file";
 
+/// `PATH_MAX` constant used in this crate
+pub const PATH_MAX: usize = 4096;
+
 /// The name of a scheme
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct RedoxScheme<'a>(Cow<'a, str>);
@@ -135,7 +138,7 @@ impl<'a> RedoxReference<'a> {
     pub fn canonical(self) -> Self {
         let mut canonicalized = true;
         let mut is_absolute = false;
-        let mut parts = [""; 4096]; // PATH_MAX
+        let mut parts = [""; PATH_MAX];
         let mut parts_len = 0;
         for (i, part) in self.0.split('/').enumerate() {
             if part.is_empty() {
@@ -152,7 +155,7 @@ impl<'a> RedoxReference<'a> {
                 }
                 canonicalized = false;
             } else {
-                if parts_len >= 4096 {
+                if parts_len >= PATH_MAX {
                     break;
                 }
                 parts[parts_len] = part;
@@ -186,7 +189,7 @@ impl<'a> RedoxReference<'a> {
     /// for next `canonical_max_upward(max_upward)`. The amount of `..` will never exceed `max_upward`.
     pub fn canonical_max_upward(self, max_upward: usize) -> Option<(Self, usize)> {
         let mut canonicalized = true;
-        let mut parts = [""; 4096]; // PATH_MAX
+        let mut parts = [""; PATH_MAX];
         let mut parts_len = 0;
         let mut upward_depth = 0;
         for (i, part) in self.0.split('/').enumerate() {
@@ -211,7 +214,7 @@ impl<'a> RedoxReference<'a> {
 
                 canonicalized = false;
             } else {
-                if parts_len + upward_depth >= 4096 {
+                if parts_len + upward_depth >= PATH_MAX {
                     break;
                 }
                 parts[parts_len] = part;
