@@ -498,11 +498,7 @@ impl<'a> RedoxPath<'a> {
     }
 
     /// Format a [`RedoxPath`] into a UNIX style path
-    pub fn to_standard(self) -> Cow<'a, str> {
-        self.to_standard_checked().0
-    }
-
-    fn to_standard_checked(self) -> RedoxReference<'a> {
+    pub fn to_standard(self) -> RedoxReference<'a> {
         match self {
             RedoxPath::Standard(reference) => reference,
             RedoxPath::Legacy(scheme, reference) => {
@@ -634,7 +630,7 @@ impl<'a> RedoxStr<'a> {
     }
 
     /// Create a [`RedoxStr`] from a buf, returns [`None`] if it not a valid UTF-8 or valid from NUL
-    fn new_from_c<S: Into<&'a CStr>>(path: S) -> Option<Self> {
+    pub fn new_from_c<S: Into<&'a CStr>>(path: S) -> Option<Self> {
         let path = path.into();
         if matches!(path.to_bytes_with_nul().first(), Some(b'/')) {
             // New /path or /scheme/scheme_name/path format
@@ -859,7 +855,7 @@ fn canonicalize_using_cwd_checked<'a, 'b>(
     let absolute = match (path, in_scheme_root) {
         (RedoxStr::Absolute(absolute), true) if absolute.get_scheme().is_some() => absolute,
         (RedoxStr::Absolute(absolute), true) => {
-            cwd_opt?.join_checked(absolute.to_standard_checked().to_relative())
+            cwd_opt?.join_checked(absolute.to_standard().to_relative())
         }
         (RedoxStr::Absolute(absolute), false) => absolute,
         (RedoxStr::Relative(relative), true) => cwd_opt?.join_checked(relative.canonical()),
@@ -1440,21 +1436,31 @@ mod tests {
     #[test]
     fn test_to_standard() {
         assert_eq!(
-            &RedoxPath::from_absolute("foo:bar").unwrap().to_standard(),
+            RedoxPath::from_absolute("foo:bar")
+                .unwrap()
+                .to_standard()
+                .as_ref(),
             "/scheme/foo/bar"
         );
         assert_eq!(
-            &RedoxPath::from_absolute("file:bar").unwrap().to_standard(),
+            RedoxPath::from_absolute("file:bar")
+                .unwrap()
+                .to_standard()
+                .as_ref(),
             "/scheme/file/bar"
         );
         assert_eq!(
-            &RedoxPath::from_absolute("/scheme/foo/bar")
+            RedoxPath::from_absolute("/scheme/foo/bar")
                 .unwrap()
-                .to_standard(),
+                .to_standard()
+                .as_ref(),
             "/scheme/foo/bar"
         );
         assert_eq!(
-            &RedoxPath::from_absolute("/foo/bar").unwrap().to_standard(),
+            RedoxPath::from_absolute("/foo/bar")
+                .unwrap()
+                .to_standard()
+                .as_ref(),
             "/foo/bar"
         );
         assert_eq!(
