@@ -102,6 +102,11 @@ impl<'a> RedoxReference<'a> {
         Self::new(s)
     }
 
+    /// SAFETY: Caller ensures that `path` contains no NUL character
+    pub unsafe fn new_unchecked<S: Into<Cow<'a, str>>>(reference: S) -> Self {
+        Self(reference.into())
+    }
+
     /// Join a [`RedoxReference`] with a path. Relative paths will be joined, absolute paths will
     /// be returned as-is.
     ///
@@ -529,6 +534,20 @@ impl<'a> RedoxPath<'a> {
         }
     }
 
+    /// Get path upward one time and the file name
+    pub fn dirname_split(&'a self) -> (RedoxPath<'a>, Option<RedoxReference<'a>>) {
+        match self {
+            RedoxPath::Standard(redox_reference) => {
+                let (dir, name) = redox_reference.dirname_split();
+                (RedoxPath::Standard(dir), name)
+            }
+            RedoxPath::Legacy(redox_scheme, redox_reference) => {
+                let (dir, name) = redox_reference.dirname_split();
+                (RedoxPath::Legacy(redox_scheme.clone(), dir), name)
+            }
+        }
+    }
+
     /// Convert into [`RedoxReference`], if it an old scheme, the scheme part will be discarded.
     pub fn to_reference(self) -> RedoxReference<'a> {
         match self {
@@ -753,11 +772,31 @@ impl<'a> RedoxStr<'a> {
             RedoxStr::Relative(redox_reference) => RedoxStr::from(redox_reference.canonical()),
         }
     }
+    /// Convert into standard UNIX style path
+    pub fn to_standard(self) -> RedoxReference<'a> {
+        match self {
+            RedoxStr::Absolute(redox_path) => redox_path.to_standard(),
+            RedoxStr::Relative(redox_reference) => redox_reference,
+        }
+    }
     /// Get path upward one time
     pub fn dirname<'b>(&self) -> RedoxStr<'b> {
         match self {
             RedoxStr::Absolute(redox_path) => RedoxStr::from(redox_path.dirname()),
             RedoxStr::Relative(redox_reference) => RedoxStr::from(redox_reference.dirname()),
+        }
+    }
+    /// Get path upward one time and the file name
+    pub fn dirname_split(&'a self) -> (RedoxStr<'a>, Option<RedoxReference<'a>>) {
+        match self {
+            RedoxStr::Absolute(redox_path) => {
+                let (dir, name) = redox_path.dirname_split();
+                (RedoxStr::from(dir), name)
+            }
+            RedoxStr::Relative(redox_reference) => {
+                let (dir, name) = redox_reference.dirname_split();
+                (RedoxStr::from(dir), name)
+            }
         }
     }
     /// This is path empty?
