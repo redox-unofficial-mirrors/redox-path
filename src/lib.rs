@@ -102,6 +102,11 @@ impl<'a> RedoxReference<'a> {
         Self::new(s)
     }
 
+    /// SAFETY: Caller ensures that `path` contains no NUL character
+    pub unsafe fn new_unchecked<S: Into<Cow<'a, str>>>(reference: S) -> Self {
+        Self(reference.into())
+    }
+
     /// Join a [`RedoxReference`] with a path. Relative paths will be joined, absolute paths will
     /// be returned as-is.
     ///
@@ -498,11 +503,7 @@ impl<'a> RedoxPath<'a> {
     }
 
     /// Format a [`RedoxPath`] into a UNIX style path
-    pub fn to_standard(self) -> Cow<'a, str> {
-        self.to_standard_checked().0
-    }
-
-    fn to_standard_checked(self) -> RedoxReference<'a> {
+    pub fn to_standard(self) -> RedoxReference<'a> {
         match self {
             RedoxPath::Standard(reference) => reference,
             RedoxPath::Legacy(scheme, reference) => {
@@ -530,6 +531,20 @@ impl<'a> RedoxPath<'a> {
                 RedoxScheme(redox_scheme.to_string().into()),
                 redox_reference.dirname(),
             ),
+        }
+    }
+
+    /// Get path upward one time and the file name
+    pub fn dirname_split(&'a self) -> (RedoxPath<'a>, Option<RedoxReference<'a>>) {
+        match self {
+            RedoxPath::Standard(redox_reference) => {
+                let (dir, name) = redox_reference.dirname_split();
+                (RedoxPath::Standard(dir), name)
+            }
+            RedoxPath::Legacy(redox_scheme, redox_reference) => {
+                let (dir, name) = redox_reference.dirname_split();
+                (RedoxPath::Legacy(redox_scheme.clone(), dir), name)
+            }
         }
     }
 
@@ -634,7 +649,7 @@ impl<'a> RedoxStr<'a> {
     }
 
     /// Create a [`RedoxStr`] from a buf, returns [`None`] if it not a valid UTF-8 or valid from NUL
-    fn new_from_c<S: Into<&'a CStr>>(path: S) -> Option<Self> {
+    pub fn new_from_c<S: Into<&'a CStr>>(path: S) -> Option<Self> {
         let path = path.into();
         if matches!(path.to_bytes_with_nul().first(), Some(b'/')) {
             // New /path or /scheme/scheme_name/path format
@@ -757,11 +772,31 @@ impl<'a> RedoxStr<'a> {
             RedoxStr::Relative(redox_reference) => RedoxStr::from(redox_reference.canonical()),
         }
     }
+    /// Convert into standard UNIX style path
+    pub fn to_standard(self) -> RedoxReference<'a> {
+        match self {
+            RedoxStr::Absolute(redox_path) => redox_path.to_standard(),
+            RedoxStr::Relative(redox_reference) => redox_reference,
+        }
+    }
     /// Get path upward one time
     pub fn dirname<'b>(&self) -> RedoxStr<'b> {
         match self {
             RedoxStr::Absolute(redox_path) => RedoxStr::from(redox_path.dirname()),
             RedoxStr::Relative(redox_reference) => RedoxStr::from(redox_reference.dirname()),
+        }
+    }
+    /// Get path upward one time and the file name
+    pub fn dirname_split(&'a self) -> (RedoxStr<'a>, Option<RedoxReference<'a>>) {
+        match self {
+            RedoxStr::Absolute(redox_path) => {
+                let (dir, name) = redox_path.dirname_split();
+                (RedoxStr::from(dir), name)
+            }
+            RedoxStr::Relative(redox_reference) => {
+                let (dir, name) = redox_reference.dirname_split();
+                (RedoxStr::from(dir), name)
+            }
         }
     }
     /// This is path empty?
@@ -859,7 +894,7 @@ fn canonicalize_using_cwd_checked<'a, 'b>(
     let absolute = match (path, in_scheme_root) {
         (RedoxStr::Absolute(absolute), true) if absolute.get_scheme().is_some() => absolute,
         (RedoxStr::Absolute(absolute), true) => {
-            cwd_opt?.join_checked(absolute.to_standard_checked().to_relative())
+            cwd_opt?.join_checked(absolute.to_standard().to_relative())
         }
         (RedoxStr::Absolute(absolute), false) => absolute,
         (RedoxStr::Relative(relative), true) => cwd_opt?.join_checked(relative.canonical()),
@@ -1440,21 +1475,31 @@ mod tests {
     #[test]
     fn test_to_standard() {
         assert_eq!(
-            &RedoxPath::from_absolute("foo:bar").unwrap().to_standard(),
+            RedoxPath::from_absolute("foo:bar")
+                .unwrap()
+                .to_standard()
+                .as_ref(),
             "/scheme/foo/bar"
         );
         assert_eq!(
-            &RedoxPath::from_absolute("file:bar").unwrap().to_standard(),
+            RedoxPath::from_absolute("file:bar")
+                .unwrap()
+                .to_standard()
+                .as_ref(),
             "/scheme/file/bar"
         );
         assert_eq!(
-            &RedoxPath::from_absolute("/scheme/foo/bar")
+            RedoxPath::from_absolute("/scheme/foo/bar")
                 .unwrap()
-                .to_standard(),
+                .to_standard()
+                .as_ref(),
             "/scheme/foo/bar"
         );
         assert_eq!(
-            &RedoxPath::from_absolute("/foo/bar").unwrap().to_standard(),
+            RedoxPath::from_absolute("/foo/bar")
+                .unwrap()
+                .to_standard()
+                .as_ref(),
             "/foo/bar"
         );
         assert_eq!(
